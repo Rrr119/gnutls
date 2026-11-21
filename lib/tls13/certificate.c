@@ -27,15 +27,19 @@
 #include "handshake.h"
 #include "tls13/certificate.h"
 #include "auth/cert.h"
+#include "cert-cred.h"
 #include "mbuffers.h"
 #include "ext/compress_certificate.h"
 #include "ext/status_request.h"
+#include "hash_int.h"
 
 static int parse_cert_extension(void *ctx, unsigned tls_id, const uint8_t *data,
 				unsigned data_size);
 static int parse_cert_list(gnutls_session_t session, uint8_t *data,
 			   size_t data_size);
-static int compress_certificate(gnutls_buffer_st *buf, unsigned cert_pos_mark,
+static int compress_certificate(gnutls_session_t session,
+				gnutls_certificate_credentials_t cred,
+				gnutls_buffer_st *buf, unsigned cert_pos_mark,
 				gnutls_compression_method_t comp_method);
 static int decompress_certificate(gnutls_session_t session,
 				  gnutls_buffer_st *buf);
@@ -381,8 +385,8 @@ int _gnutls13_send_certificate(gnutls_session_t session, unsigned again)
 				     &buf.data[pos_mark]);
 
 		if (compress_cert) {
-			ret = compress_certificate(&buf, cert_pos_mark,
-						   comp_method);
+			ret = compress_certificate(session, cred, &buf,
+						   cert_pos_mark, comp_method);
 			if (ret < 0) {
 				gnutls_assert();
 				goto cleanup;
@@ -604,12 +608,17 @@ cleanup:
 	return ret;
 }
 
-static int compress_certificate(gnutls_buffer_st *buf, unsigned cert_pos_mark,
+static int compress_certificate(gnutls_session_t session,
+				gnutls_certificate_credentials_t cred,
+				gnutls_buffer_st *buf, unsigned cert_pos_mark,
 				gnutls_compression_method_t comp_method)
 {
 	int ret, method_num;
+	int cache_hit = 0;
+	int cacheable = 0;
 	size_t comp_bound;
 	gnutls_datum_t plain, comp = { NULL, 0 };
+	uint8_t digest[GNUTLS_CERT_COMP_CACHE_DIGEST_SIZE];
 
 	method_num = _gnutls_compress_certificate_method2num(comp_method);
 	if (method_num == GNUTLS_E_RECEIVED_ILLEGAL_PARAMETER)
@@ -618,19 +627,39 @@ static int compress_certificate(gnutls_buffer_st *buf, unsigned cert_pos_mark,
 	plain.data = buf->data + cert_pos_mark;
 	plain.size = buf->length - cert_pos_mark;
 
-	comp_bound = _gnutls_compress_bound(comp_method, plain.size);
-	if (comp_bound == 0)
-		return gnutls_assert_val(GNUTLS_E_INTERNAL_ERROR);
-	comp.data = gnutls_malloc(comp_bound);
-	if (comp.data == NULL)
-		return gnutls_assert_val(GNUTLS_E_MEMORY_ERROR);
-	ret = _gnutls_compress(comp_method, comp.data, comp_bound, plain.data,
-			       plain.size);
-	if (ret < 0) {
-		gnutls_assert();
-		goto cleanup;
+	if (plain.size > UINT32_MAX)
+		return gnutls_assert_val(GNUTLS_E_INVALID_REQUEST);
+
+	if (_gnutls_hash_fast(GNUTLS_DIG_SHA256, plain.data, plain.size,
+			      digest) >= 0) {
+		cacheable = 1;
+		cache_hit = _gnutls_certificate_compression_cache_get(
+			cred, comp_method, digest, plain.size, &comp);
 	}
-	comp.size = ret;
+
+	if (!cache_hit) {
+		comp_bound = _gnutls_compress_bound(comp_method, plain.size);
+		if (comp_bound == 0)
+			return gnutls_assert_val(GNUTLS_E_INTERNAL_ERROR);
+		comp.data = gnutls_malloc(comp_bound);
+		if (comp.data == NULL)
+			return gnutls_assert_val(GNUTLS_E_MEMORY_ERROR);
+		ret = _gnutls_compress(comp_method, comp.data, comp_bound,
+				       plain.data, plain.size);
+		if (ret < 0) {
+			gnutls_assert();
+			goto cleanup;
+		}
+		comp.size = ret;
+
+		if (cacheable)
+			_gnutls_certificate_compression_cache_put(
+				cred, comp_method, digest, plain.size, &comp);
+	} else {
+		_gnutls_handshake_log(
+			"HSK[%p]: certificate compression cache hit (%s)\n",
+			session, gnutls_compression_get_name(comp_method));
+	}
 
 	buf->length = cert_pos_mark;
 	ret = _gnutls_buffer_append_uint16(buf, method_num);

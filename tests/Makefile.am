@@ -130,7 +130,8 @@ ctests = tls13/supported_versions tls13/tls12-no-tls13-exts \
 	tls12-check-rollback-val tls11-check-rollback-val \
 	tls13/post-handshake-with-psk tls13/post-handshake-with-cert-auto \
 	tls13/anti_replay tls13/compress-cert tls13/compress-cert-neg \
-	tls13/compress-cert-neg2 tls13/compress-cert-cli
+	tls13/compress-cert-neg2 tls13/compress-cert-cli \
+	tls13/compress-cert-cache
 
 ctests += tls13/hello_retry_request
 
@@ -532,7 +533,7 @@ dist_check_SCRIPTS += fastopen.sh pkgconfig.sh starttls.sh starttls-ftp.sh start
 	sni-resume.sh ocsp-tests/ocsptool.sh cert-reencoding.sh pkcs7-cat.sh long-crl.sh \
 	serv-udp.sh logfile-option.sh gnutls-cli-resume.sh profile-tests.sh \
 	server-weak-keys.sh ocsp-tests/ocsp-signer-verify.sh cfg-test.sh \
-	gnutls-cli-earlydata.sh
+	gnutls-cli-earlydata.sh tls13/compress-cert-interop.sh
 
 if ENABLE_TPM2
 if TPM2_ENABLE_DLOPEN

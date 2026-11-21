@@ -42,6 +42,21 @@ int _gnutls_read_key_file(gnutls_certificate_credentials_t res,
 
 int _gnutls_get_x509_name(gnutls_x509_crt_t crt, gnutls_str_array_t *names);
 
+int _gnutls_certificate_compression_cache_init(
+	gnutls_certificate_credentials_t cred);
+void _gnutls_certificate_compression_cache_deinit(
+	gnutls_certificate_credentials_t cred);
+void _gnutls_certificate_compression_cache_clear(
+	gnutls_certificate_credentials_t cred);
+int _gnutls_certificate_compression_cache_get(
+	gnutls_certificate_credentials_t cred,
+	gnutls_compression_method_t method, const uint8_t *digest,
+	uint32_t uncompressed_length, gnutls_datum_t *compressed);
+void _gnutls_certificate_compression_cache_put(
+	gnutls_certificate_credentials_t cred,
+	gnutls_compression_method_t method, const uint8_t *digest,
+	uint32_t uncompressed_length, const gnutls_datum_t *compressed);
+
 #define CRED_RET_SUCCESS(cred)                         \
 	if (cred->flags & GNUTLS_CERTIFICATE_API_V2) { \
 		return cred->ncerts - 1;               \

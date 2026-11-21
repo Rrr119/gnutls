@@ -265,7 +265,9 @@ Note that setting certificate compression algorithms does not guarantee that
 the certificate will be compressed. Setting certificate compression algorithms
 will indicate to the peer which compression methods are supported and the peer
 may decide to compress the certificate with one of these methods. Algorithms
-that appear earlier in the list will be prefered over those appearing later.
+that appear earlier in the list will be preferred over those appearing later.
+Compressed certificate messages are cached per credentials and reused across
+handshakes while the certificate list and its extensions remain unchanged.
 
 Below example shows how to enable the TLS certificate compression.
 @example

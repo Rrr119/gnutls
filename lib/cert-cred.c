@@ -44,6 +44,153 @@
 #include "dh.h"
 #include "cert-cred.h"
 #include "intprops.h"
+#include "locks.h"
+
+static void cert_comp_cache_entry_clear(cert_comp_cache_st *cache,
+					cert_comp_cache_entry_st *entry)
+{
+	if (!entry->used)
+		return;
+
+	if (cache->total_size >= entry->compressed.size)
+		cache->total_size -= entry->compressed.size;
+	else
+		cache->total_size = 0;
+
+	gnutls_free(entry->compressed.data);
+	memset(entry, 0, sizeof(*entry));
+}
+
+int _gnutls_certificate_compression_cache_init(
+	gnutls_certificate_credentials_t cred)
+{
+	return gnutls_mutex_init(&cred->cert_comp_cache.lock);
+}
+
+void _gnutls_certificate_compression_cache_deinit(
+	gnutls_certificate_credentials_t cred)
+{
+	_gnutls_certificate_compression_cache_clear(cred);
+	gnutls_mutex_deinit(&cred->cert_comp_cache.lock);
+}
+
+void _gnutls_certificate_compression_cache_clear(
+	gnutls_certificate_credentials_t cred)
+{
+	cert_comp_cache_st *cache = &cred->cert_comp_cache;
+	unsigned i;
+
+	if (cache->lock == NULL)
+		return;
+
+	gnutls_mutex_lock(&cache->lock);
+	for (i = 0; i < GNUTLS_CERT_COMP_CACHE_ENTRIES; i++)
+		cert_comp_cache_entry_clear(cache, &cache->entries[i]);
+	cache->next_entry = 0;
+	cache->total_size = 0;
+	gnutls_mutex_unlock(&cache->lock);
+}
+
+int _gnutls_certificate_compression_cache_get(
+	gnutls_certificate_credentials_t cred,
+	gnutls_compression_method_t method, const uint8_t *digest,
+	uint32_t uncompressed_length, gnutls_datum_t *compressed)
+{
+	cert_comp_cache_st *cache = &cred->cert_comp_cache;
+	cert_comp_cache_entry_st *entry;
+	unsigned i;
+	int found = 0;
+
+	compressed->data = NULL;
+	compressed->size = 0;
+
+	if (cache->lock == NULL)
+		return 0;
+
+	gnutls_mutex_lock(&cache->lock);
+	for (i = 0; i < GNUTLS_CERT_COMP_CACHE_ENTRIES; i++) {
+		entry = &cache->entries[i];
+		if (!entry->used || entry->method != method ||
+		    entry->uncompressed_length != uncompressed_length ||
+		    memcmp(entry->digest, digest,
+			   GNUTLS_CERT_COMP_CACHE_DIGEST_SIZE) != 0)
+			continue;
+
+		compressed->data = gnutls_malloc(entry->compressed.size);
+		if (compressed->data != NULL) {
+			memcpy(compressed->data, entry->compressed.data,
+			       entry->compressed.size);
+			compressed->size = entry->compressed.size;
+			found = 1;
+		}
+		break;
+	}
+	gnutls_mutex_unlock(&cache->lock);
+
+	return found;
+}
+
+void _gnutls_certificate_compression_cache_put(
+	gnutls_certificate_credentials_t cred,
+	gnutls_compression_method_t method, const uint8_t *digest,
+	uint32_t uncompressed_length, const gnutls_datum_t *compressed)
+{
+	cert_comp_cache_st *cache = &cred->cert_comp_cache;
+	cert_comp_cache_entry_st *entry = NULL;
+	uint8_t *copy;
+	unsigned i, idx;
+
+	if (cache->lock == NULL || compressed->size == 0 ||
+	    compressed->size > GNUTLS_CERT_COMP_CACHE_MAX_BYTES)
+		return;
+
+	copy = gnutls_malloc(compressed->size);
+	if (copy == NULL)
+		return;
+	memcpy(copy, compressed->data, compressed->size);
+
+	gnutls_mutex_lock(&cache->lock);
+
+	for (i = 0; i < GNUTLS_CERT_COMP_CACHE_ENTRIES; i++) {
+		if (cache->entries[i].used &&
+		    cache->entries[i].method == method &&
+		    cache->entries[i].uncompressed_length ==
+			    uncompressed_length &&
+		    memcmp(cache->entries[i].digest, digest,
+			   GNUTLS_CERT_COMP_CACHE_DIGEST_SIZE) == 0) {
+			entry = &cache->entries[i];
+			break;
+		}
+		if (entry == NULL && !cache->entries[i].used)
+			entry = &cache->entries[i];
+	}
+
+	if (entry == NULL) {
+		idx = cache->next_entry % GNUTLS_CERT_COMP_CACHE_ENTRIES;
+		entry = &cache->entries[idx];
+		cache->next_entry = idx + 1;
+	}
+
+	cert_comp_cache_entry_clear(cache, entry);
+
+	if (cache->total_size + compressed->size >
+	    GNUTLS_CERT_COMP_CACHE_MAX_BYTES) {
+		for (i = 0; i < GNUTLS_CERT_COMP_CACHE_ENTRIES; i++)
+			cert_comp_cache_entry_clear(cache, &cache->entries[i]);
+		entry = &cache->entries[0];
+		cache->next_entry = 1;
+	}
+
+	entry->method = method;
+	entry->uncompressed_length = uncompressed_length;
+	memcpy(entry->digest, digest, GNUTLS_CERT_COMP_CACHE_DIGEST_SIZE);
+	entry->compressed.data = copy;
+	entry->compressed.size = compressed->size;
+	entry->used = true;
+	cache->total_size += compressed->size;
+
+	gnutls_mutex_unlock(&cache->lock);
+}
 
 /*
  * Adds a public/private key pair to a certificate credential
@@ -52,6 +199,8 @@ int _gnutls_certificate_credential_append_keypair(
 	gnutls_certificate_credentials_t res, gnutls_privkey_t key,
 	gnutls_str_array_t names, gnutls_pcert_st *crt, int nr)
 {
+	_gnutls_certificate_compression_cache_clear(res);
+
 	if (unlikely(INT_ADD_OVERFLOW(res->ncerts, 1))) {
 		return gnutls_assert_val(GNUTLS_E_MEMORY_ERROR);
 	}
@@ -247,6 +396,8 @@ void gnutls_certificate_free_keys(gnutls_certificate_credentials_t sc)
 {
 	unsigned i, j;
 
+	_gnutls_certificate_compression_cache_clear(sc);
+
 	for (i = 0; i < sc->ncerts; i++) {
 		for (j = 0; j < sc->certs[i].cert_list_length; j++) {
 			gnutls_pcert_deinit(&sc->certs[i].cert_list[j]);
@@ -381,6 +532,7 @@ void gnutls_certificate_free_credentials(gnutls_certificate_credentials_t sc)
 
 	gnutls_x509_trust_list_deinit(sc->tlist, 1);
 	gnutls_certificate_free_keys(sc);
+	_gnutls_certificate_compression_cache_deinit(sc);
 	memset(sc->pin_tmp, 0, sizeof(sc->pin_tmp));
 
 	if (sc->deinit_dh_params) {
@@ -414,6 +566,16 @@ int gnutls_certificate_allocate_credentials(
 		gnutls_free(*res);
 		return GNUTLS_E_MEMORY_ERROR;
 	}
+
+	ret = _gnutls_certificate_compression_cache_init(*res);
+	if (ret < 0) {
+		gnutls_assert();
+		gnutls_x509_trust_list_deinit((*res)->tlist, 1);
+		gnutls_free(*res);
+		*res = NULL;
+		return ret;
+	}
+
 	(*res)->verify_depth = DEFAULT_MAX_VERIFY_DEPTH;
 
 	return 0;

@@ -34,6 +34,25 @@
 
 #define MAX_OCSP_RESPONSES 8
 
+#define GNUTLS_CERT_COMP_CACHE_ENTRIES 4
+#define GNUTLS_CERT_COMP_CACHE_DIGEST_SIZE 32
+#define GNUTLS_CERT_COMP_CACHE_MAX_BYTES (4 * 1024 * 1024)
+
+typedef struct {
+	gnutls_compression_method_t method;
+	uint32_t uncompressed_length;
+	uint8_t digest[GNUTLS_CERT_COMP_CACHE_DIGEST_SIZE];
+	gnutls_datum_t compressed;
+	bool used;
+} cert_comp_cache_entry_st;
+
+typedef struct {
+	cert_comp_cache_entry_st entries[GNUTLS_CERT_COMP_CACHE_ENTRIES];
+	unsigned next_entry;
+	size_t total_size;
+	void *lock;
+} cert_comp_cache_st;
+
 /* We use the structure below to hold a certificate chain
  * with corresponding public/private key pair. This structure will
  * also be used when raw public keys are used. The cert_list will
@@ -105,6 +124,9 @@ typedef struct gnutls_certificate_credentials_st {
 	/* This is only used by server to indicate whether this
 	 * credentials can be used for signing in TLS 1.3. */
 	bool tls13_ok;
+
+	/* Cache of complete compressed Certificate messages. */
+	cert_comp_cache_st cert_comp_cache;
 } certificate_credentials_st;
 
 /* This is the information we keep for the peer
